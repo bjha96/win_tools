@@ -1,2 +1,2 @@
 # win_tools
-Miscellaneous tools and scripts for troubleshooting and testing Windows Systems
+Miscellaneous tools and utilities for troubleshooting and testing Windows Systems
