@@ -4,6 +4,7 @@
 
 
 using System.Diagnostics;
+using System.Text;
 
 namespace NetWatchCLI
 {
@@ -78,11 +79,14 @@ namespace NetWatchCLI
             Trace.Listeners.Add(new TextWriterTraceListener(Console.Error));
             Trace.AutoFlush = true;
 
-            IList<NetInfo> ConnectionsList = GetConnections();
-            foreach (NetInfo netInfo in ConnectionsList)
+            IList<NetInfo> connectionsList = GetConnections();
+            var sb = new StringBuilder();
+            sb.AppendLine("Protocol,SourceIP,SourcePort,DestIp,DestPort,ProcessId,ConnectionState");
+            foreach (NetInfo netInfo in connectionsList)
             {
-                Console.WriteLine(netInfo.ToString());
+                sb.AppendLine($"{netInfo.Protocol},{netInfo.SourceIp},{netInfo.SourcePort},{netInfo.DestIp},{netInfo.DestPort},{netInfo.ProcId},{netInfo.State}");
             }
+            Console.WriteLine(sb.ToString());
         }
 
 
@@ -106,23 +110,23 @@ namespace NetWatchCLI
                 Thread? stdoutReader = null, stderrReader = null;
                 IList<string> outputLines = new List<string>();
 
+                //stdout reader
                 if (proc.StartInfo.RedirectStandardOutput)
                 {
-                    var stdout = proc.StandardOutput;
-                    stdoutReader = new Thread(() => ThreadWorkers.ConsumeStream(stdout, outputLines));
+                    stdoutReader = new Thread(() => ThreadWorkers.ConsumeStream(proc.StandardOutput, outputLines));
                     stdoutReader.Start();
                 }
 
+                //stderr Reader
                 if (proc.StartInfo.RedirectStandardError)
                 {
-                    var stderr = proc.StandardError;
-                    stderrReader = new Thread(() => ThreadWorkers.ConsumeStream(stderr, outputLines));
+                    stderrReader = new Thread(() => ThreadWorkers.ConsumeStream(proc.StandardError, outputLines));
                     stderrReader.Start();
                 }
 
                 if (!proc.WaitForExit(60 * 1000))//wait for 60s
                 {
-                    Trace.TraceWarning("Process hang!");
+                    Trace.TraceWarning($"Process {proc.Id} hang!");
                     proc.Kill();
                 }
 
@@ -168,14 +172,14 @@ namespace NetWatchCLI
                 {
                     //Adjust for UDP socket state
                     //UDP has no connection state, only 4 tokens in the output line
-                    //We will put 4th index as socket state -                
+                    //We will put 4th index as blank socket state               
                     Trace.TraceInformation($"Adjusting UDP tokens {line}");
                     var tokens2 = new string[5];
                     for (int i = 0; i <= 2; i++)
                     {
                         tokens2[i] = tokens[i];
                     }
-                    tokens2[3] = "-"; //socket state for udp
+                    tokens2[3] = "NA"; //socket state for udp
                     tokens2[4] = tokens[3]; //process Id
                     tokens = tokens2;
                 }
@@ -188,7 +192,7 @@ namespace NetWatchCLI
                 var dipNport = ExtractIPandPort(tokens[2]);
                 Trace.TraceInformation($"dip:port= {dipNport[0]}<->{dipNport[1]}");
 
-                NetInfo netInfo = new NetInfo
+                NetInfo netInfo = new()
                 {
                     Protocol = tokens[0],
                     SourceIp = sipNport[0],
