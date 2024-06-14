@@ -5,9 +5,14 @@
 */
 
 ///
-/// Simple program to list writable and executable folders.
+/// Simple program to find writable and executable folders.
+/// It creates a temp batch file in folder and then tests it can be
+/// executed by the current process user.
+/// USAGE Notes:
+/// Use without any cmd line args to scan the current folder (work dir).
+/// Use cmd line arg -a to scan all drives.
+/// Use cmd line <folder path> to scan only the target <folder path>.
 ///
-
 
 using System;
 using System.IO;
@@ -85,6 +90,10 @@ class ThreadWorker
                     File.WriteAllText(testExePath, "@echo hello world" + Environment.NewLine);
                     return true;
                 }
+                catch(UnauthorizedAccessException)
+                {
+                    Trace.TraceWarning($"Write access denied in {folder}");
+                }
                 catch (Exception e)
                 {
                     Trace.TraceWarning($"Failed to write in {folder} due to {e}");
@@ -114,6 +123,10 @@ class ThreadWorker
                         return (proc.ExitCode == 0);
                     }
                 }
+                catch(UnauthorizedAccessException)
+                {
+                    Trace.TraceWarning($"Execute access denied on {testExePath}");
+                }
                 catch (Exception e)
                 {
                     Trace.TraceWarning($"Failed to execute {testExePath} due to {e}");
@@ -134,7 +147,7 @@ class Program
         Trace.Listeners.Add(new TextWriterTraceListener(Console.Error));
         Trace.AutoFlush = true;
 
-        ConcurrentQueue<string> foldersQueue = new ConcurrentQueue<string>();
+        ConcurrentQueue<string> foldersQueue = new();
        
         Thread[] workers = new Thread[2];
         for (int i = 0; i < workers.Length; i++)
@@ -177,7 +190,7 @@ class Program
             }
             catch (Exception ex)
             {
-                Trace.TraceError(ex.ToString());
+                Trace.TraceError($"Failed to scan {rootFolder} due to {ex}");
             }
         }
 
@@ -203,7 +216,7 @@ class Program
         }
         catch (Exception e)
         {
-            Trace.TraceError($"Failed to scan folder {e.Message}");
+            Trace.TraceWarning($"Failed to scan folder {e.Message}");
         }
     }
 }
