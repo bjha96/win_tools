@@ -5,149 +5,287 @@
 */
 
 
-namespace ProcEnumerator;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Management;
+using CommandLine;
+using System.Text;
+
 
 /// <summary>
+/// <p>
 /// Finds running processes and checks the host directories of these
 /// executables and loaded assemblies for write and execute permission 
 /// for the current user. Can be used for checking loose folder hardening 
 /// for services/processes running with system privileges.
+/// </p>
+/// <br />
+/// <b>Usage:</b>
+/// <br />
+/// <p>
+/// Run with -p for checking only existing process folders.
+/// <br />
+/// Run with -s for checking only installed services folders.
+/// <br />
+/// Do not supply any cmd line args, to check both processes and services folders.
+/// </p>
 /// </summary>
 #pragma warning disable CS8604 // Possible null reference argument.
-[SupportedOSPlatform("windows")]
-class Program
+namespace ProcEnumerator
 {
-    const string TEST_EXE_NAME = "~$psTest.bat";
-
-    static void Main(string[] args)
+    [SupportedOSPlatform("windows")]
+    class Program
     {
-        //Trace.Listeners affects .Net core also
-        //Trace.Listeners.Add(new ConsoleTraceListener());
-        Debug.AutoFlush = true;
-        //Trace.AutoFlush = true;
+        //const string TEST_EXE_NAME = "~$psTest.bat";
 
-        var exePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        var procs = Process.GetProcesses();
-        Debug.WriteLine("Found {0} running processes", procs.Length);
-
-        foreach (var proc in procs)
+        static void Main(string[] args)
         {
             try
             {
-                var mods = proc.Modules;
-
-                for (int i = 0; i < mods.Count; i++)
+                using (var debugLog = File.CreateText(Path.Combine(Path.GetTempPath(), "PsEnumerator.log")))
                 {
-                    var path = mods[i].FileName;
+                    SetupDebugLogs(debugLog);
 
-                    if (String.IsNullOrEmpty(path))
-                    {
-                        continue;
-                    }
-                    exePaths.Add(Path.GetDirectoryName(path));
+                    var exePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                    var cmdOpts = Parser.Default.ParseArguments<CmdOptions>(args);
+                    cmdOpts.WithParsed<CmdOptions>(O =>
+                        {
+                            if (O.Services)
+                            {
+                                CheckInstalledServices(exePaths);
+                            }
+                            else if (O.Processes)
+                            {
+                                CheckRunningProcesses(exePaths);
+                            }
+                            else //if (O.All) is default
+                            {
+                                CheckInstalledServices(exePaths);
+                                CheckRunningProcesses(exePaths);
+                            }
+                        }
+                    );
+
+                    Debug.WriteLine($"Found **{exePaths.Count}** unique exe folders:");
+                    Debug.WriteLine(String.Join(Environment.NewLine, exePaths));
+
+                    CheckWXPermissionOnFolders(exePaths);
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine("Failed to enumerate modules in process {0} due to {1}", proc.ProcessName, ex.Message);
+                Console.Error.WriteLine($"Fatal error {ex}");
             }
         }
 
-        Debug.WriteLine("Found {0} unique exePaths", exePaths.Count);
-
-        var currUser = WindowsIdentity.GetCurrent();
-
-        foreach (var exePath in exePaths)
+        private static void SetupDebugLogs(StreamWriter dest)
         {
-            if (CanWriteInFolder(exePath, currUser.Name))
+            //Trace.Listeners affects .Net core also
+            Trace.Listeners.Add(new TextWriterTraceListener(dest));
+            Debug.AutoFlush = true;
+            Trace.AutoFlush = true;
+        }
+
+        private static void CheckInstalledServices(HashSet<string> exePaths)
+        {
+            try
             {
-                Debug.WriteLine($"Writable folder {exePath} found");
-                if(CanExecuteInFolder(exePath))
+                using (ManagementObjectSearcher mos = new ManagementObjectSearcher(
+                    "root\\CIMV2",
+                    "SELECT Name,PathName,StartMode,State FROM Win32_Service"))
                 {
-                    Console.WriteLine(exePath);
-                }
-            }
-            else //No permission
-            {
-                Debug.WriteLine("No write perm: " + exePath);
-            }
-        }
-    }
-
-    static bool CanExecuteInFolder(string folder)
-    {
-        var testExePath = Path.Combine(folder, TEST_EXE_NAME);
-        bool allowed = false;
-
-        try
-        {
-            //write a test bat file
-            File.WriteAllText(testExePath, "@echo hello world" + Environment.NewLine);
-            using Process proc = new();
-            proc.StartInfo = new ProcessStartInfo(testExePath)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WorkingDirectory = folder
-            };
-
-            if (proc.Start() && proc.WaitForExit(5 * 1000))
-            {
-                allowed = (proc.ExitCode == 0);
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.WriteLine($"Failed to execute in {folder} due to {e}");
-        }
-
-        if (File.Exists(testExePath))
-        {
-            File.Delete(testExePath);
-        }
-
-        return allowed;
-    }
-
-    private static bool CanWriteInFolder(string folderPath, string userPrincipal)
-    {
-        DirectoryInfo dirInfo = new(folderPath);
-
-        try
-        {            
-            DirectorySecurity dirSec = dirInfo.GetAccessControl();
-         
-            AuthorizationRuleCollection rules = dirSec.GetAccessRules(true, true, typeof(NTAccount));
-
-            foreach (AuthorizationRule rule in rules)
-            {
-                if (rule.IdentityReference.Value.Equals(userPrincipal, StringComparison.InvariantCultureIgnoreCase))
-                {
-                    FileSystemAccessRule fsRule = (FileSystemAccessRule)rule;
-
-                    if ((fsRule.FileSystemRights & FileSystemRights.WriteData) > 0)
+                    foreach (var moq in mos.Get())
                     {
-                        return true;
+                        using (moq)
+                        {
+                            string? exeCmdLine = moq["PathName"] as string;
+                            Debug.WriteLine($"Found service: {moq["Name"]} {moq["StartMode"]} {moq["State"]} {exeCmdLine}");
+
+                            //Pathname looks like "C:\Program Files\Windows Media Player\wmpnetwk.exe" -k -a "abcdef"
+                            //need to parse the exe path and extract the folder from it
+                            if (!String.IsNullOrWhiteSpace(exeCmdLine))
+                            {
+                                var exePath = ExtractExePath(exeCmdLine);
+                                exePaths.Add(Path.GetDirectoryName(exePath));
+                            }
+                        }
                     }
                 }
             }
+            catch (ManagementException mex)
+            {
+                Trace.TraceWarning($"Failed to query services due to {mex.Message}");
+            }
         }
-        catch (PrivilegeNotHeldException)
+
+
+        //Sample exeCmdLine: 
+        //"C:\Program Files\Windows Media Player\wmpnetwk.exe" -k -a "abcdef"
+        //C:\windows\system32\xyz.exe -k -a "abcdef"
+        private static string ExtractExePath(string exeCmdLine)
         {
-            Debug.WriteLine("Failed to read permissions on " + folderPath);
+            StringBuilder sb = new StringBuilder();
+            bool openingQuoteCharSeen = false;
+            foreach (char ch in exeCmdLine.ToCharArray())
+            {
+                if (ch == '"')
+                {
+                    if (!openingQuoteCharSeen)
+                    {
+                        openingQuoteCharSeen = true;
+                        continue;
+                    }
+
+                    openingQuoteCharSeen = false;
+                    return sb.ToString(); //end of exe cmd in cmdLine
+                }
+                else if (ch == ' ')
+                {
+                    if (!openingQuoteCharSeen) //not a quoted string, cmdline switch break
+                    {
+                        return sb.ToString();
+                    }
+                }
+
+                sb.Append(ch);
+            }
+
+            return sb.ToString();
         }
 
-        Debug.Close();
-        Trace.Close();
+        private static void CheckWXPermissionOnFolders(HashSet<string> exePaths)
+        {
+            var currUser = WindowsIdentity.GetCurrent();
 
-        return false;
+            foreach (var exePath in exePaths)
+            {
+                if (CanWriteExecuteInFolder(exePath, currUser.Name))
+                {
+                    Debug.WriteLine($"Writable folder {exePath} found");
+                    //if (CanExecuteInFolder(exePath))
+                    {
+                        Console.WriteLine(exePath);
+                    }
+                }
+                else //No permission
+                {
+                    Debug.WriteLine("No write perm: " + exePath);
+                }
+            }
+        }
+
+        private static void CheckRunningProcesses(HashSet<string> exePaths)
+        {
+            var procs = Process.GetProcesses();
+            Debug.WriteLine("Found {0} running processes", procs.Length);
+
+            foreach (var proc in procs)
+            {
+                try
+                {
+                    var mods = proc.Modules;
+
+                    for (int i = 0; i < mods.Count; i++)
+                    {
+                        var path = mods[i].FileName;
+
+                        if (String.IsNullOrEmpty(path))
+                        {
+                            continue;
+                        }
+                        exePaths.Add(Path.GetDirectoryName(path));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Trace.WriteLine($"Failed to enumerate modules in **{proc.ProcessName}* due to {ex.Message}");
+                }
+            }
+        }
+
+        /*
+                static bool CanExecuteInFolder(string folder)
+                {
+                    var testExePath = Path.Combine(folder, TEST_EXE_NAME);
+                    bool allowed = false;
+
+                    try
+                    {
+                        //write a test bat file
+                        File.WriteAllText(testExePath, "@echo hello world" + Environment.NewLine);
+                        using Process proc = new();
+                        proc.StartInfo = new ProcessStartInfo(testExePath)
+                        {
+                            UseShellExecute = false,
+                            CreateNoWindow = true,
+                            WorkingDirectory = folder
+                        };
+
+                        if (proc.Start() && proc.WaitForExit(5 * 1000))
+                        {
+                            allowed = (proc.ExitCode == 0);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.WriteLine($"Failed to execute in {folder} due to {e}");
+                    }
+
+                    if (File.Exists(testExePath))
+                    {
+                        File.Delete(testExePath);
+                    }
+
+                    return allowed;
+                }
+        */
+
+        private static bool CanWriteExecuteInFolder(string folderPath, string userPrincipal)
+        {
+            DirectoryInfo dirInfo = new(folderPath);
+            bool allowed = false;
+
+            try
+            {
+                DirectorySecurity dirSec = dirInfo.GetAccessControl();
+                AuthorizationRuleCollection rules = dirSec.GetAccessRules(true, true, typeof(NTAccount));
+
+                foreach (AuthorizationRule rule in rules)
+                {
+                    if (rule.IdentityReference.Value.Equals(userPrincipal, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        FileSystemAccessRule fsRule = (FileSystemAccessRule)rule;
+
+                        if ((fsRule.FileSystemRights & FileSystemRights.WriteData) == FileSystemRights.WriteData
+                            && (fsRule.AccessControlType == AccessControlType.Allow))
+                        {
+                            //check execute
+                            if ((FileSystemRights.ExecuteFile & fsRule.FileSystemRights) == FileSystemRights.ExecuteFile
+                                && (fsRule.AccessControlType == AccessControlType.Allow))
+                            {
+                                allowed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (PrivilegeNotHeldException)
+            {
+                Debug.WriteLine($"Failed to read permissions on {folderPath}");
+            }
+
+            Debug.Close();
+            Trace.Close();
+
+            return allowed;
+        }
     }
 }
 #pragma warning restore CS8604 // Possible null reference argument.
