@@ -19,9 +19,9 @@ using System.Text;
 
 /// <summary>
 /// <p>
-/// Finds running processes and checks the host directories of these
+/// Finds running processes and installed services on the localhost and checks the directories of these
 /// executables and loaded assemblies for write and execute permission 
-/// for the current user. Can be used for checking loose folder hardening 
+/// for the current user. Can be used for checking loose folder which missed hardening 
 /// for services/processes running with system privileges.
 /// </p>
 /// <br />
@@ -98,14 +98,14 @@ namespace ProcEnumerator
             {
                 using (ManagementObjectSearcher mos = new ManagementObjectSearcher(
                     "root\\CIMV2",
-                    "SELECT Name,PathName,StartMode,State FROM Win32_Service"))
+                    "SELECT Name,PathName,StartMode,State,StartName FROM Win32_Service"))
                 {
                     foreach (var moq in mos.Get())
                     {
                         using (moq)
                         {
                             string? exeCmdLine = moq["PathName"] as string;
-                            Debug.WriteLine($"Found service: {moq["Name"]} {moq["StartMode"]} {moq["State"]} {exeCmdLine}");
+                            Debug.WriteLine($"Found service: {moq["Name"]} {moq["StartMode"]} {moq["State"]} {moq["StartName"]} {exeCmdLine}");
 
                             //Pathname looks like "C:\Program Files\Windows Media Player\wmpnetwk.exe" -k -a "abcdef"
                             //need to parse the exe path and extract the folder from it
